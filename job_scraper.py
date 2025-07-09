@@ -638,7 +638,7 @@ def main_job_check():
     sources = [
         ("jobs.at", check_jobs_at),
         ("karriere.at", check_karriere_at),
-        ("stepstone.at", check_stepstone_at),
+        ("xing.com", check_xing_jobs),
         ("indeed.at", check_indeed_at),
         ("devjobs.at", check_devjobs_at),
         ("epunkt.com", check_epunkt_com)
