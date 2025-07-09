@@ -179,6 +179,80 @@ def find_matching_keywords(title, description=""):
 
 # ==================== JOB SCRAPING FUNCTIONS ====================
 
+def check_xing_jobs():
+    """
+    Bonus: Scrape XING Jobs (Austrian section)
+    Returns: List of job dictionaries
+    """
+    logger.info("🔍 Checking XING Jobs...")
+    new_jobs = []
+    
+    headers = {'User-Agent': get_random_user_agent()}
+    
+    for keyword in KEYWORDS[:3]:  # Limit keywords for XING to avoid blocking
+        try:
+            # XING Jobs search URL
+            search_url = f"https://www.xing.com/jobs/search?keywords={quote_plus(keyword)}&location=Austria"
+            
+            response = requests.get(search_url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # XING job selectors
+                job_elements = soup.find_all('article', class_='job-card')
+                
+                if not job_elements:
+                    job_elements = soup.find_all('div', class_='job-item')
+                
+                for job_element in job_elements[:3]:  # Very limited to avoid blocking
+                    try:
+                        title_elem = job_element.find('h3') or job_element.find('h2')
+                        company_elem = job_element.find('span', class_='company-name')
+                        location_elem = job_element.find('span', class_='location')
+                        link_elem = job_element.find('a', href=True)
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text(strip=True)
+                            company = company_elem.get_text(strip=True) if company_elem else 'Unknown Company'
+                            location = location_elem.get_text(strip=True) if location_elem else 'Austria'
+                            
+                            job_url = link_elem.get('href')
+                            if job_url.startswith('/'):
+                                job_url = "https://www.xing.com" + job_url
+                            
+                            if should_exclude_job(title):
+                                continue
+                            
+                            if not is_job_already_sent(job_url):
+                                keywords_matched = find_matching_keywords(title)
+                                
+                                job_data = {
+                                    'title': title,
+                                    'company': company,
+                                    'location': location,
+                                    'url': job_url,
+                                    'posted_date': 'Recent',
+                                    'source': 'xing.com',
+                                    'keywords_matched': keywords_matched
+                                }
+                                new_jobs.append(job_data)
+                                save_job_to_db(job_data)
+                        
+                    except Exception as e:
+                        logger.error(f"Error parsing XING job element: {e}")
+                        continue
+            
+            # Longer delay for XING as they're strict
+            time.sleep(random.uniform(8, 12))
+            
+        except Exception as e:
+            logger.error(f"Error checking XING for {keyword}: {e}")
+            continue
+    
+    logger.info(f"✅ Found {len(new_jobs)} new jobs on XING")
+    return new_jobs
+
+
 def check_jobs_at():
     """Scrape jobs.at - Main Austrian job portal"""
     logger.info("🔍 Checking jobs.at...")
@@ -325,62 +399,6 @@ def check_karriere_at():
     logger.info(f"✅ Found {len(new_jobs)} new jobs on karriere.at")
     return new_jobs
 
-def check_stepstone_at():
-    """Check StepStone.at using RSS feeds"""
-    logger.info("🔍 Checking stepstone.at...")
-    new_jobs = []
-    
-    for keyword in KEYWORDS:
-        try:
-            rss_url = f"https://www.stepstone.at/jobs/rss?what={quote_plus(keyword)}&where=Austria"
-            
-            feed = feedparser.parse(rss_url)
-            
-            for entry in feed.entries[:3]:
-                try:
-                    title = entry.title
-                    company = getattr(entry, 'author', 'Unknown Company')
-                    location = 'Austria'
-                    job_url = entry.link
-                    posted_date = getattr(entry, 'published', 'Unknown')
-                    
-                    if hasattr(entry, 'summary'):
-                        summary = entry.summary.lower()
-                        for loc in LOCATIONS:
-                            if loc.lower() in summary:
-                                location = loc
-                                break
-                    
-                    if should_exclude_job(title):
-                        continue
-                    
-                    if not is_job_already_sent(job_url):
-                        keywords_matched = find_matching_keywords(title)
-                        
-                        job_data = {
-                            'title': title,
-                            'company': company,
-                            'location': location,
-                            'url': job_url,
-                            'posted_date': posted_date,
-                            'source': 'stepstone.at',
-                            'keywords_matched': keywords_matched
-                        }
-                        new_jobs.append(job_data)
-                        save_job_to_db(job_data)
-                    
-                except Exception as e:
-                    logger.error(f"Error parsing RSS entry: {e}")
-                    continue
-            
-            time.sleep(random.uniform(2, 3))
-            
-        except Exception as e:
-            logger.error(f"Error checking stepstone.at RSS for {keyword}: {e}")
-            continue
-    
-    logger.info(f"✅ Found {len(new_jobs)} new jobs on stepstone.at")
-    return new_jobs
 
 def check_indeed_at():
     """Scrape Indeed Austria"""
@@ -529,80 +547,6 @@ def check_devjobs_at():
     
     logger.info(f"✅ Found {len(new_jobs)} new jobs on devjobs.at")
     return new_jobs
-
-def check_xing_jobs():
-    """
-    Bonus: Scrape XING Jobs (Austrian section)
-    Returns: List of job dictionaries
-    """
-    logger.info("🔍 Checking XING Jobs...")
-    new_jobs = []
-    
-    headers = {'User-Agent': get_random_user_agent()}
-    
-    for keyword in KEYWORDS[:3]:  # Limit keywords for XING to avoid blocking
-        try:
-            # XING Jobs search URL
-            search_url = f"https://www.xing.com/jobs/search?keywords={quote_plus(keyword)}&location=Austria"
-            
-            response = requests.get(search_url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # XING job selectors
-                job_elements = soup.find_all('article', class_='job-card')
-                
-                if not job_elements:
-                    job_elements = soup.find_all('div', class_='job-item')
-                
-                for job_element in job_elements[:3]:  # Very limited to avoid blocking
-                    try:
-                        title_elem = job_element.find('h3') or job_element.find('h2')
-                        company_elem = job_element.find('span', class_='company-name')
-                        location_elem = job_element.find('span', class_='location')
-                        link_elem = job_element.find('a', href=True)
-                        
-                        if title_elem and link_elem:
-                            title = title_elem.get_text(strip=True)
-                            company = company_elem.get_text(strip=True) if company_elem else 'Unknown Company'
-                            location = location_elem.get_text(strip=True) if location_elem else 'Austria'
-                            
-                            job_url = link_elem.get('href')
-                            if job_url.startswith('/'):
-                                job_url = "https://www.xing.com" + job_url
-                            
-                            if should_exclude_job(title):
-                                continue
-                            
-                            if not is_job_already_sent(job_url):
-                                keywords_matched = find_matching_keywords(title)
-                                
-                                job_data = {
-                                    'title': title,
-                                    'company': company,
-                                    'location': location,
-                                    'url': job_url,
-                                    'posted_date': 'Recent',
-                                    'source': 'xing.com',
-                                    'keywords_matched': keywords_matched
-                                }
-                                new_jobs.append(job_data)
-                                save_job_to_db(job_data)
-                        
-                    except Exception as e:
-                        logger.error(f"Error parsing XING job element: {e}")
-                        continue
-            
-            # Longer delay for XING as they're strict
-            time.sleep(random.uniform(8, 12))
-            
-        except Exception as e:
-            logger.error(f"Error checking XING for {keyword}: {e}")
-            continue
-    
-    logger.info(f"✅ Found {len(new_jobs)} new jobs on XING")
-    return new_jobs
-
 
 
 
