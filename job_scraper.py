@@ -471,6 +471,210 @@ def check_indeed_at():
     logger.info(f"✅ Found {len(new_jobs)} new jobs on Indeed")
     return new_jobs
 
+def check_linkedin_jobs():
+    """
+    Scrape LinkedIn Jobs for Austria - Enhanced version
+    Returns: List of job dictionaries
+    """
+    logger.info("🔍 Checking LinkedIn Jobs...")
+    new_jobs = []
+    
+    headers = {
+        'User-Agent': get_random_user_agent(),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+    }
+    
+    # Limit keywords for LinkedIn to avoid being blocked
+    limited_keywords = KEYWORDS[:5]  # Only use first 5 keywords
+    
+    for keyword in limited_keywords:
+        try:
+            # LinkedIn public job search URL (no login required)
+            # Using f_TPR=r86400 for jobs posted in last 24 hours
+            search_url = f"https://www.linkedin.com/jobs/search?keywords={quote_plus(keyword)}&location=Austria&f_TPR=r86400&position=1&pageNum=0"
+            
+            response = requests.get(search_url, headers=headers, timeout=20)
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'html.parser')
+                
+                # LinkedIn job card selectors (multiple fallbacks)
+                job_elements = (
+                    soup.find_all('div', class_='base-card') or
+                    soup.find_all('div', class_='job-search-card') or
+                    soup.find_all('div', attrs={'data-entity-urn': True}) or
+                    soup.find_all('li', class_='result-card')
+                )
+                
+                for job_element in job_elements[:3]:  # Limit to 3 jobs per keyword
+                    try:
+                        # Extract job title with multiple selectors
+                        title_elem = (
+                            job_element.find('h3', class_='base-search-card__title') or
+                            job_element.find('h3', class_='job-search-card__title') or
+                            job_element.find('a', class_='result-card__full-card-link') or
+                            job_element.find('h3') or
+                            job_element.find('h2')
+                        )
+                        
+                        # Extract company with multiple selectors
+                        company_elem = (
+                            job_element.find('h4', class_='base-search-card__subtitle') or
+                            job_element.find('a', class_='job-search-card__subtitle-link') or
+                            job_element.find('h4', class_='job-search-card__subtitle') or
+                            job_element.find('span', class_='job-search-card__subtitle-text')
+                        )
+                        
+                        # Extract location
+                        location_elem = (
+                            job_element.find('span', class_='job-search-card__location') or
+                            job_element.find('span', class_='base-search-card__location') or
+                            job_element.find('div', class_='job-search-card__location')
+                        )
+                        
+                        # Extract job link
+                        link_elem = (
+                            job_element.find('a', class_='base-card__full-link') or
+                            job_element.find('a', class_='result-card__full-card-link') or
+                            job_element.find('a', href=True)
+                        )
+                        
+                        # Extract posting time if available
+                        time_elem = (
+                            job_element.find('time', class_='job-search-card__listdate') or
+                            job_element.find('time', class_='base-search-card__listdate')
+                        )
+                        
+                        if title_elem and link_elem:
+                            title = title_elem.get_text(strip=True)
+                            company = company_elem.get_text(strip=True) if company_elem else 'Company via LinkedIn'
+                            location = location_elem.get_text(strip=True) if location_elem else 'Austria'
+                            posted_date = time_elem.get_text(strip=True) if time_elem else 'Recent'
+                            
+                            # Get job URL
+                            job_url = link_elem.get('href')
+                            
+                            # Clean up the URL if needed
+                            if job_url and not job_url.startswith('http'):
+                                if job_url.startswith('/'):
+                                    job_url = "https://www.linkedin.com" + job_url
+                                else:
+                                    job_url = "https://www.linkedin.com/" + job_url
+                            
+                            # Clean up extracted text
+                            title = title.replace('\n', ' ').replace('\t', ' ').strip()
+                            company = company.replace('\n', ' ').replace('\t', ' ').strip()
+                            location = location.replace('\n', ' ').replace('\t', ' ').strip()
+                            
+                            # Remove extra whitespace and line breaks
+                            title = ' '.join(title.split())
+                            company = ' '.join(company.split())
+                            location = ' '.join(location.split())
+                            
+                            # Check if job should be excluded
+                            if should_exclude_job(title):
+                                continue
+                            
+                            # Check if job is already in database
+                            if job_url and not is_job_already_sent(job_url):
+                                keywords_matched = find_matching_keywords(title)
+                                
+                                job_data = {
+                                    'title': title,
+                                    'company': company,
+                                    'location': location,
+                                    'url': job_url,
+                                    'posted_date': posted_date,
+                                    'source': 'linkedin.com',
+                                    'keywords_matched': keywords_matched
+                                }
+                                new_jobs.append(job_data)
+                                save_job_to_db(job_data)
+                                
+                                logger.info(f"Found LinkedIn job: {title} at {company}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error parsing LinkedIn job element: {e}")
+                        continue
+            
+            elif response.status_code == 429:
+                logger.warning("LinkedIn rate limit hit - skipping remaining keywords")
+                break
+            else:
+                logger.warning(f"LinkedIn returned status code: {response.status_code}")
+            
+            # Longer delay for LinkedIn as they're strict about rate limiting
+            time.sleep(random.uniform(8, 12))
+            
+        except requests.exceptions.Timeout:
+            logger.warning(f"LinkedIn timeout for keyword: {keyword}")
+            continue
+        except Exception as e:
+            logger.error(f"Error checking LinkedIn for {keyword}: {e}")
+            continue
+    
+    logger.info(f"✅ Found {len(new_jobs)} new jobs on LinkedIn")
+    return new_jobs
+
+
+def check_linkedin_jobs_alternative():
+    """
+    Alternative LinkedIn scraper using different approach
+    Use this if the main function gets blocked
+    """
+    logger.info("🔍 Checking LinkedIn Jobs (Alternative method)...")
+    new_jobs = []
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    }
+    
+    # Try LinkedIn's RSS-style job feeds (sometimes available)
+    for keyword in KEYWORDS[:3]:  # Very limited
+        try:
+            # Alternative: LinkedIn job RSS (may or may not work)
+            rss_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPostings/jobs?keywords={quote_plus(keyword)}&location=Austria&start=0"
+            
+            response = requests.get(rss_url, headers=headers, timeout=15)
+            if response.status_code == 200:
+                # This would be JSON or HTML response
+                data = response.text
+                
+                # Simple HTML parsing for job titles and links
+                soup = BeautifulSoup(data, 'html.parser')
+                job_links = soup.find_all('a', href=True)
+                
+                for link in job_links[:2]:  # Very limited
+                    href = link.get('href')
+                    title = link.get_text(strip=True)
+                    
+                    if 'linkedin.com/jobs/view' in href and title:
+                        if not is_job_already_sent(href):
+                            job_data = {
+                                'title': title,
+                                'company': 'LinkedIn Company',
+                                'location': 'Austria',
+                                'url': href,
+                                'posted_date': 'Recent',
+                                'source': 'linkedin.com',
+                                'keywords_matched': find_matching_keywords(title)
+                            }
+                            new_jobs.append(job_data)
+                            save_job_to_db(job_data)
+            
+            time.sleep(random.uniform(10, 15))
+            
+        except Exception as e:
+            logger.error(f"Error with LinkedIn alternative method: {e}")
+            continue
+    
+    logger.info(f"✅ Found {len(new_jobs)} new jobs on LinkedIn (alternative)")
+    return new_jobs
+
 def check_devjobs_at():
     """Scrape devjobs.at - Austrian tech job portal"""
     logger.info("🔍 Checking devjobs.at...")
@@ -641,7 +845,8 @@ def main_job_check():
         ("xing.com", check_xing_jobs),
         ("indeed.at", check_indeed_at),
         ("devjobs.at", check_devjobs_at),
-        ("epunkt.com", check_epunkt_com)
+        ("epunkt.com", check_epunkt_com),
+        ("linkedin.com", check_linkedin_jobs)
     ]
     
     for source_name, check_function in sources:
@@ -696,7 +901,7 @@ def send_test_message():
     test_message = "🤖 <b>Austrian Job Scraper Bot Activated!</b>\n\n"
     test_message += "✅ Telegram connection working\n"
     test_message += "🔍 Monitoring Austrian job portals:\n"
-    test_message += "• jobs.at\n• karriere.at\n• stepstone.at\n• indeed.at\n• devjobs.at\n• epunkt.com\n\n"
+    test_message += "• jobs.at\n• karriere.at\n• stepstone.at\n• indeed.at\n• devjobs.at\n• epunkt.com\n• linkedin.com\n\n"
     test_message += f"⏰ Checking every 2 hours\n"
     test_message += f"🎯 Monitoring {len(KEYWORDS)} keywords\n"
     test_message += f"📍 Targeting {len(LOCATIONS)} locations\n\n"
@@ -854,7 +1059,7 @@ def start_scheduler():
 if __name__ == "__main__":
     print("🚀 Starting Austrian Job Scraper Bot...")
     print("📱 Telegram notifications enabled")
-    print("🔍 Monitoring 6 job portals every 2 hours")
+    print("🔍 Monitoring 8 job portals every 2 hours")
     print("⏹️  Press Ctrl+C to stop")
     
     try:
