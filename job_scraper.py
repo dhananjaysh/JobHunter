@@ -127,24 +127,31 @@ def send_telegram_message(message):
         logger.error(f"Error sending Telegram message: {e}")
         return False
 
-def format_job_message(jobs, source_name):
-    """Format job data for Telegram message"""
-    if not jobs:
+def format_consolidated_job_message(all_jobs):
+    """Format ALL jobs from ALL sources into ONE message"""
+    if not all_jobs:
         return None
     
-    message = f"🚀 <b>{len(jobs)} New Jobs from {source_name}!</b>\n\n"
+    # Group jobs by source
+    jobs_by_source = {}
+    for job in all_jobs:
+        source = job['source']
+        if source not in jobs_by_source:
+            jobs_by_source[source] = []
+        jobs_by_source[source].append(job)
     
-    for i, job in enumerate(jobs[:8]):  # Limit to 8 jobs per message
-        message += f"📋 <b>{job['title']}</b>\n"
-        message += f"🏢 {job['company']}\n"
-        message += f"📍 {job['location']}\n"
-        message += f"🔗 <a href='{job['url']}'>Apply Here</a>\n"
-        if job.get('keywords_matched'):
-            message += f"🎯 Keywords: {job['keywords_matched']}\n"
+    message = f"🚀 <b>{len(all_jobs)} New Jobs Found!</b>\n\n"
+    
+    # Show breakdown by source
+    for source, jobs in jobs_by_source.items():
+        message += f"📋 <b>{source.upper()}</b> ({len(jobs)} jobs)\n"
+        for job in jobs[:3]:  # Show max 3 jobs per source to keep message manageable
+            message += f"• {job['title']} at {job['company']}\n"
+            message += f"  📍 {job['location']}\n"
+            message += f"  🔗 <a href='{job['url']}'>Apply</a>\n"
+        if len(jobs) > 3:
+            message += f"  ... and {len(jobs) - 3} more\n"
         message += "\n"
-    
-    if len(jobs) > 8:
-        message += f"... and {len(jobs) - 8} more jobs found!\n"
     
     message += f"⏰ Found at: {datetime.now().strftime('%H:%M:%S')}"
     
@@ -179,80 +186,6 @@ def find_matching_keywords(title, description=""):
 
 # ==================== JOB SCRAPING FUNCTIONS ====================
 
-def check_xing_jobs():
-    """
-    Bonus: Scrape XING Jobs (Austrian section)
-    Returns: List of job dictionaries
-    """
-    logger.info("🔍 Checking XING Jobs...")
-    new_jobs = []
-    
-    headers = {'User-Agent': get_random_user_agent()}
-    
-    for keyword in KEYWORDS[:3]:  # Limit keywords for XING to avoid blocking
-        try:
-            # XING Jobs search URL
-            search_url = f"https://www.xing.com/jobs/search?keywords={quote_plus(keyword)}&location=Austria"
-            
-            response = requests.get(search_url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                # XING job selectors
-                job_elements = soup.find_all('article', class_='job-card')
-                
-                if not job_elements:
-                    job_elements = soup.find_all('div', class_='job-item')
-                
-                for job_element in job_elements[:3]:  # Very limited to avoid blocking
-                    try:
-                        title_elem = job_element.find('h3') or job_element.find('h2')
-                        company_elem = job_element.find('span', class_='company-name')
-                        location_elem = job_element.find('span', class_='location')
-                        link_elem = job_element.find('a', href=True)
-                        
-                        if title_elem and link_elem:
-                            title = title_elem.get_text(strip=True)
-                            company = company_elem.get_text(strip=True) if company_elem else 'Unknown Company'
-                            location = location_elem.get_text(strip=True) if location_elem else 'Austria'
-                            
-                            job_url = link_elem.get('href')
-                            if job_url.startswith('/'):
-                                job_url = "https://www.xing.com" + job_url
-                            
-                            if should_exclude_job(title):
-                                continue
-                            
-                            if not is_job_already_sent(job_url):
-                                keywords_matched = find_matching_keywords(title)
-                                
-                                job_data = {
-                                    'title': title,
-                                    'company': company,
-                                    'location': location,
-                                    'url': job_url,
-                                    'posted_date': 'Recent',
-                                    'source': 'xing.com',
-                                    'keywords_matched': keywords_matched
-                                }
-                                new_jobs.append(job_data)
-                                save_job_to_db(job_data)
-                        
-                    except Exception as e:
-                        logger.error(f"Error parsing XING job element: {e}")
-                        continue
-            
-            # Longer delay for XING as they're strict
-            time.sleep(random.uniform(8, 12))
-            
-        except Exception as e:
-            logger.error(f"Error checking XING for {keyword}: {e}")
-            continue
-    
-    logger.info(f"✅ Found {len(new_jobs)} new jobs on XING")
-    return new_jobs
-
-
 def check_jobs_at():
     """Scrape jobs.at - Main Austrian job portal"""
     logger.info("🔍 Checking jobs.at...")
@@ -260,7 +193,8 @@ def check_jobs_at():
     
     headers = {'User-Agent': get_random_user_agent()}
     
-    for keyword in KEYWORDS:
+    # Only check first 3 keywords to avoid being blocked
+    for keyword in KEYWORDS[:3]:
         try:
             search_url = f"https://www.jobs.at/stellenangebote/{quote_plus(keyword)}"
             
@@ -271,34 +205,24 @@ def check_jobs_at():
                 job_elements = soup.find_all('article', class_='c-jobitem')
                 if not job_elements:
                     job_elements = soup.find_all('div', class_='c-jobitem')
-                if not job_elements:
-                    job_elements = soup.find_all('div', attrs={'data-cy': 'job-item'})
                 
-                for job_element in job_elements[:5]:
+                for job_element in job_elements[:2]:  # Only 2 jobs per keyword
                     try:
-                        title_elem = (job_element.find('h2') or 
-                                    job_element.find('h3') or 
-                                    job_element.find('a', class_='jobTitle'))
-                        
+                        title_elem = job_element.find('h2') or job_element.find('h3')
                         link_elem = job_element.find('a', href=True)
                         
                         if title_elem and link_elem:
                             title = title_elem.get_text(strip=True)
                             
-                            company_elem = (job_element.find('span', class_='company') or
-                                          job_element.find('div', class_='company') or
-                                          job_element.find('span', string=lambda text: text and 'bei' in text.lower()))
-                            company = company_elem.get_text(strip=True).replace('bei ', '') if company_elem else 'Unknown Company'
+                            company_elem = job_element.find('span', class_='company')
+                            company = company_elem.get_text(strip=True) if company_elem else 'Unknown Company'
                             
-                            location_elem = (job_element.find('span', class_='location') or
-                                           job_element.find('div', class_='location'))
+                            location_elem = job_element.find('span', class_='location')
                             location = location_elem.get_text(strip=True) if location_elem else 'Austria'
                             
                             job_url = link_elem.get('href')
                             if job_url.startswith('/'):
                                 job_url = "https://www.jobs.at" + job_url
-                            elif not job_url.startswith('http'):
-                                job_url = "https://www.jobs.at/" + job_url
                             
                             if should_exclude_job(title):
                                 continue
@@ -322,7 +246,7 @@ def check_jobs_at():
                         logger.error(f"Error parsing job element: {e}")
                         continue
             
-            time.sleep(random.uniform(2, 4))
+            time.sleep(random.uniform(3, 5))
             
         except Exception as e:
             logger.error(f"Error checking jobs.at for {keyword}: {e}")
@@ -338,7 +262,7 @@ def check_karriere_at():
     
     headers = {'User-Agent': get_random_user_agent()}
     
-    for keyword in KEYWORDS:
+    for keyword in KEYWORDS[:3]:  # Limit keywords
         try:
             search_url = f"https://www.karriere.at/jobs/{quote_plus(keyword)}"
             
@@ -346,17 +270,13 @@ def check_karriere_at():
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                job_elements = (soup.find_all('article', class_='m-jobItem') or 
-                              soup.find_all('div', class_='jobitem') or
-                              soup.find_all('div', class_='job-item'))
+                job_elements = soup.find_all('article', class_='m-jobItem')
                 
-                for job_element in job_elements[:5]:
+                for job_element in job_elements[:2]:  # Only 2 jobs per keyword
                     try:
                         title_elem = job_element.find('h2') or job_element.find('h3')
-                        company_elem = (job_element.find('span', class_='company') or 
-                                      job_element.find('div', class_='company'))
-                        location_elem = (job_element.find('span', class_='location') or 
-                                       job_element.find('div', class_='location'))
+                        company_elem = job_element.find('span', class_='company')
+                        location_elem = job_element.find('span', class_='location')
                         link_elem = job_element.find('a', href=True)
                         
                         if title_elem and link_elem:
@@ -399,7 +319,6 @@ def check_karriere_at():
     logger.info(f"✅ Found {len(new_jobs)} new jobs on karriere.at")
     return new_jobs
 
-
 def check_indeed_at():
     """Scrape Indeed Austria"""
     logger.info("🔍 Checking Indeed Austria...")
@@ -407,7 +326,7 @@ def check_indeed_at():
     
     headers = {'User-Agent': get_random_user_agent()}
     
-    for keyword in KEYWORDS[:5]:  # Limit to avoid being blocked
+    for keyword in KEYWORDS[:2]:  # Very limited to avoid blocking
         try:
             search_url = f"https://at.indeed.com/jobs?q={quote_plus(keyword)}&l=Austria&sort=date&fromage=1"
             
@@ -415,30 +334,22 @@ def check_indeed_at():
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                job_elements = (soup.find_all('div', class_='job_seen_beacon') or 
-                              soup.find_all('a', attrs={'data-jk': True}) or
-                              soup.find_all('div', class_='jobsearch-SerpJobCard'))
+                job_elements = soup.find_all('div', class_='job_seen_beacon')
                 
-                for job_element in job_elements[:3]:
+                for job_element in job_elements[:2]:  # Only 2 jobs per keyword
                     try:
-                        title_elem = (job_element.find('h2', class_='jobTitle') or 
-                                    job_element.find('span', title=True) or
-                                    job_element.find('a', title=True))
-                        company_elem = (job_element.find('span', class_='companyName') or 
-                                      job_element.find('a', attrs={'data-testid': 'company-name'}))
+                        title_elem = job_element.find('h2', class_='jobTitle')
+                        company_elem = job_element.find('span', class_='companyName')
                         location_elem = job_element.find('div', class_='companyLocation')
-                        link_elem = job_element.find('a', href=True) or job_element if job_element.name == 'a' else None
+                        link_elem = job_element.find('a', href=True)
                         
                         if title_elem and link_elem:
-                            title = title_elem.get_text(strip=True) or title_elem.get('title', '')
+                            title = title_elem.get_text(strip=True)
                             company = company_elem.get_text(strip=True) if company_elem else 'Unknown Company'
                             location = location_elem.get_text(strip=True) if location_elem else 'Austria'
                             
                             href = link_elem.get('href')
-                            if href.startswith('/'):
-                                job_url = "https://at.indeed.com" + href
-                            else:
-                                job_url = href
+                            job_url = "https://at.indeed.com" + href if href.startswith('/') else href
                             
                             if should_exclude_job(title):
                                 continue
@@ -462,7 +373,7 @@ def check_indeed_at():
                         logger.error(f"Error parsing Indeed job element: {e}")
                         continue
             
-            time.sleep(random.uniform(4, 6))
+            time.sleep(random.uniform(5, 8))
             
         except Exception as e:
             logger.error(f"Error checking Indeed for {keyword}: {e}")
@@ -472,114 +383,48 @@ def check_indeed_at():
     return new_jobs
 
 def check_linkedin_jobs():
-    """
-    Scrape LinkedIn Jobs for Austria - Enhanced version
-    Returns: List of job dictionaries
-    """
+    """Scrape LinkedIn Jobs for Austria - Simplified version"""
     logger.info("🔍 Checking LinkedIn Jobs...")
     new_jobs = []
     
     headers = {
         'User-Agent': get_random_user_agent(),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
         'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
     }
     
-    # Limit keywords for LinkedIn to avoid being blocked
-    limited_keywords = KEYWORDS[:5]  # Only use first 5 keywords
-    
-    for keyword in limited_keywords:
+    # Only use 2 keywords for LinkedIn to avoid blocking
+    for keyword in KEYWORDS[:2]:
         try:
-            # LinkedIn public job search URL (no login required)
-            # Using f_TPR=r86400 for jobs posted in last 24 hours
-            search_url = f"https://www.linkedin.com/jobs/search?keywords={quote_plus(keyword)}&location=Austria&f_TPR=r86400&position=1&pageNum=0"
+            search_url = f"https://www.linkedin.com/jobs/search?keywords={quote_plus(keyword)}&location=Austria&f_TPR=r86400"
             
             response = requests.get(search_url, headers=headers, timeout=20)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.content, 'html.parser')
                 
-                # LinkedIn job card selectors (multiple fallbacks)
-                job_elements = (
-                    soup.find_all('div', class_='base-card') or
-                    soup.find_all('div', class_='job-search-card') or
-                    soup.find_all('div', attrs={'data-entity-urn': True}) or
-                    soup.find_all('li', class_='result-card')
-                )
+                job_elements = soup.find_all('div', class_='base-card')[:2]  # Only 2 jobs per keyword
                 
-                for job_element in job_elements[:3]:  # Limit to 3 jobs per keyword
+                for job_element in job_elements:
                     try:
-                        # Extract job title with multiple selectors
-                        title_elem = (
-                            job_element.find('h3', class_='base-search-card__title') or
-                            job_element.find('h3', class_='job-search-card__title') or
-                            job_element.find('a', class_='result-card__full-card-link') or
-                            job_element.find('h3') or
-                            job_element.find('h2')
-                        )
-                        
-                        # Extract company with multiple selectors
-                        company_elem = (
-                            job_element.find('h4', class_='base-search-card__subtitle') or
-                            job_element.find('a', class_='job-search-card__subtitle-link') or
-                            job_element.find('h4', class_='job-search-card__subtitle') or
-                            job_element.find('span', class_='job-search-card__subtitle-text')
-                        )
-                        
-                        # Extract location
-                        location_elem = (
-                            job_element.find('span', class_='job-search-card__location') or
-                            job_element.find('span', class_='base-search-card__location') or
-                            job_element.find('div', class_='job-search-card__location')
-                        )
-                        
-                        # Extract job link
-                        link_elem = (
-                            job_element.find('a', class_='base-card__full-link') or
-                            job_element.find('a', class_='result-card__full-card-link') or
-                            job_element.find('a', href=True)
-                        )
-                        
-                        # Extract posting time if available
-                        time_elem = (
-                            job_element.find('time', class_='job-search-card__listdate') or
-                            job_element.find('time', class_='base-search-card__listdate')
-                        )
+                        title_elem = job_element.find('h3', class_='base-search-card__title')
+                        company_elem = job_element.find('h4', class_='base-search-card__subtitle')
+                        location_elem = job_element.find('span', class_='job-search-card__location')
+                        link_elem = job_element.find('a', class_='base-card__full-link')
                         
                         if title_elem and link_elem:
                             title = title_elem.get_text(strip=True)
-                            company = company_elem.get_text(strip=True) if company_elem else 'Company via LinkedIn'
+                            company = company_elem.get_text(strip=True) if company_elem else 'LinkedIn Company'
                             location = location_elem.get_text(strip=True) if location_elem else 'Austria'
-                            posted_date = time_elem.get_text(strip=True) if time_elem else 'Recent'
-                            
-                            # Get job URL
                             job_url = link_elem.get('href')
                             
-                            # Clean up the URL if needed
-                            if job_url and not job_url.startswith('http'):
-                                if job_url.startswith('/'):
-                                    job_url = "https://www.linkedin.com" + job_url
-                                else:
-                                    job_url = "https://www.linkedin.com/" + job_url
-                            
-                            # Clean up extracted text
-                            title = title.replace('\n', ' ').replace('\t', ' ').strip()
-                            company = company.replace('\n', ' ').replace('\t', ' ').strip()
-                            location = location.replace('\n', ' ').replace('\t', ' ').strip()
-                            
-                            # Remove extra whitespace and line breaks
+                            # Clean up text
                             title = ' '.join(title.split())
                             company = ' '.join(company.split())
                             location = ' '.join(location.split())
                             
-                            # Check if job should be excluded
                             if should_exclude_job(title):
                                 continue
                             
-                            # Check if job is already in database
                             if job_url and not is_job_already_sent(job_url):
                                 keywords_matched = find_matching_keywords(title)
                                 
@@ -588,31 +433,23 @@ def check_linkedin_jobs():
                                     'company': company,
                                     'location': location,
                                     'url': job_url,
-                                    'posted_date': posted_date,
+                                    'posted_date': 'Recent',
                                     'source': 'linkedin.com',
                                     'keywords_matched': keywords_matched
                                 }
                                 new_jobs.append(job_data)
                                 save_job_to_db(job_data)
-                                
-                                logger.info(f"Found LinkedIn job: {title} at {company}")
                         
                     except Exception as e:
                         logger.error(f"Error parsing LinkedIn job element: {e}")
                         continue
             
             elif response.status_code == 429:
-                logger.warning("LinkedIn rate limit hit - skipping remaining keywords")
+                logger.warning("LinkedIn rate limit hit")
                 break
-            else:
-                logger.warning(f"LinkedIn returned status code: {response.status_code}")
             
-            # Longer delay for LinkedIn as they're strict about rate limiting
-            time.sleep(random.uniform(8, 12))
+            time.sleep(random.uniform(10, 15))  # Longer delay for LinkedIn
             
-        except requests.exceptions.Timeout:
-            logger.warning(f"LinkedIn timeout for keyword: {keyword}")
-            continue
         except Exception as e:
             logger.error(f"Error checking LinkedIn for {keyword}: {e}")
             continue
@@ -620,432 +457,77 @@ def check_linkedin_jobs():
     logger.info(f"✅ Found {len(new_jobs)} new jobs on LinkedIn")
     return new_jobs
 
-
-def check_linkedin_jobs_alternative():
-    """
-    Alternative LinkedIn scraper using different approach
-    Use this if the main function gets blocked
-    """
-    logger.info("🔍 Checking LinkedIn Jobs (Alternative method)...")
-    new_jobs = []
-    
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-    }
-    
-    # Try LinkedIn's RSS-style job feeds (sometimes available)
-    for keyword in KEYWORDS[:3]:  # Very limited
-        try:
-            # Alternative: LinkedIn job RSS (may or may not work)
-            rss_url = f"https://www.linkedin.com/jobs-guest/jobs/api/jobPostings/jobs?keywords={quote_plus(keyword)}&location=Austria&start=0"
-            
-            response = requests.get(rss_url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                # This would be JSON or HTML response
-                data = response.text
-                
-                # Simple HTML parsing for job titles and links
-                soup = BeautifulSoup(data, 'html.parser')
-                job_links = soup.find_all('a', href=True)
-                
-                for link in job_links[:2]:  # Very limited
-                    href = link.get('href')
-                    title = link.get_text(strip=True)
-                    
-                    if 'linkedin.com/jobs/view' in href and title:
-                        if not is_job_already_sent(href):
-                            job_data = {
-                                'title': title,
-                                'company': 'LinkedIn Company',
-                                'location': 'Austria',
-                                'url': href,
-                                'posted_date': 'Recent',
-                                'source': 'linkedin.com',
-                                'keywords_matched': find_matching_keywords(title)
-                            }
-                            new_jobs.append(job_data)
-                            save_job_to_db(job_data)
-            
-            time.sleep(random.uniform(10, 15))
-            
-        except Exception as e:
-            logger.error(f"Error with LinkedIn alternative method: {e}")
-            continue
-    
-    logger.info(f"✅ Found {len(new_jobs)} new jobs on LinkedIn (alternative)")
-    return new_jobs
-
-def check_devjobs_at():
-    """Scrape devjobs.at - Austrian tech job portal"""
-    logger.info("🔍 Checking devjobs.at...")
-    new_jobs = []
-    
-    headers = {'User-Agent': get_random_user_agent()}
-    
-    for keyword in KEYWORDS:
-        try:
-            search_url = f"https://devjobs.at/jobs?search={quote_plus(keyword)}&location=Austria"
-            
-            response = requests.get(search_url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                job_elements = soup.find_all('div', class_='job-listing')
-                if not job_elements:
-                    job_elements = soup.find_all('article', class_='job-item')
-                if not job_elements:
-                    job_elements = soup.find_all('div', class_='job-card')
-                
-                for job_element in job_elements[:3]:
-                    try:
-                        title_elem = (job_element.find('h2', class_='job-title') or
-                                    job_element.find('h3', class_='job-title') or
-                                    job_element.find('a', class_='job-title') or
-                                    job_element.find('h2') or job_element.find('h3'))
-                        
-                        company_elem = (job_element.find('span', class_='company-name') or
-                                      job_element.find('div', class_='company') or
-                                      job_element.find('p', class_='company'))
-                        
-                        location_elem = (job_element.find('span', class_='location') or
-                                       job_element.find('div', class_='location'))
-                        
-                        link_elem = job_element.find('a', href=True)
-                        
-                        if title_elem and link_elem:
-                            title = title_elem.get_text(strip=True)
-                            company = company_elem.get_text(strip=True) if company_elem else 'Tech Company'
-                            location = location_elem.get_text(strip=True) if location_elem else 'Austria'
-                            
-                            job_url = link_elem.get('href')
-                            if job_url.startswith('/'):
-                                job_url = "https://devjobs.at" + job_url
-                            
-                            if should_exclude_job(title):
-                                continue
-                            
-                            if not is_job_already_sent(job_url):
-                                keywords_matched = find_matching_keywords(title)
-                                
-                                job_data = {
-                                    'title': title,
-                                    'company': company,
-                                    'location': location,
-                                    'url': job_url,
-                                    'posted_date': 'Recent',
-                                    'source': 'devjobs.at',
-                                    'keywords_matched': keywords_matched
-                                }
-                                new_jobs.append(job_data)
-                                save_job_to_db(job_data)
-                        
-                    except Exception as e:
-                        logger.error(f"Error parsing devjobs.at job element: {e}")
-                        continue
-            
-            time.sleep(random.uniform(3, 5))
-            
-        except Exception as e:
-            logger.error(f"Error checking devjobs.at for {keyword}: {e}")
-            continue
-    
-    logger.info(f"✅ Found {len(new_jobs)} new jobs on devjobs.at")
-    return new_jobs
-
-
-
-def check_epunkt_com():
-    """Scrape epunkt.com - Austrian recruitment agency"""
-    logger.info("🔍 Checking epunkt.com...")
-    new_jobs = []
-    
-    headers = {'User-Agent': get_random_user_agent()}
-    
-    for keyword in KEYWORDS:
-        try:
-            search_url = f"https://www.epunkt.com/jobs/search?q={quote_plus(keyword)}&location=Austria"
-            
-            response = requests.get(search_url, headers=headers, timeout=15)
-            if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'html.parser')
-                
-                job_elements = soup.find_all('div', class_='job-item')
-                if not job_elements:
-                    job_elements = soup.find_all('article', class_='job')
-                if not job_elements:
-                    job_elements = soup.find_all('div', class_='position')
-                
-                for job_element in job_elements[:3]:
-                    try:
-                        title_elem = (job_element.find('h2', class_='position-title') or
-                                    job_element.find('h3', class_='job-title') or
-                                    job_element.find('a', class_='job-link') or
-                                    job_element.find('h2') or job_element.find('h3'))
-                        
-                        company_elem = (job_element.find('span', class_='company') or
-                                      job_element.find('div', class_='company-name') or
-                                      job_element.find('p', class_='company'))
-                        
-                        location_elem = (job_element.find('span', class_='location') or
-                                       job_element.find('div', class_='job-location'))
-                        
-                        link_elem = job_element.find('a', href=True)
-                        
-                        if title_elem and link_elem:
-                            title = title_elem.get_text(strip=True)
-                            company = company_elem.get_text(strip=True) if company_elem else 'Epunkt Client'
-                            location = location_elem.get_text(strip=True) if location_elem else 'Austria'
-                            
-                            job_url = link_elem.get('href')
-                            if job_url.startswith('/'):
-                                job_url = "https://www.epunkt.com" + job_url
-                            
-                            if should_exclude_job(title):
-                                continue
-                            
-                            if not is_job_already_sent(job_url):
-                                keywords_matched = find_matching_keywords(title)
-                                
-                                job_data = {
-                                    'title': title,
-                                    'company': company,
-                                    'location': location,
-                                    'url': job_url,
-                                    'posted_date': 'Recent',
-                                    'source': 'epunkt.com',
-                                    'keywords_matched': keywords_matched
-                                }
-                                new_jobs.append(job_data)
-                                save_job_to_db(job_data)
-                        
-                    except Exception as e:
-                        logger.error(f"Error parsing epunkt.com job element: {e}")
-                        continue
-            
-            time.sleep(random.uniform(3, 5))
-            
-        except Exception as e:
-            logger.error(f"Error checking epunkt.com for {keyword}: {e}")
-            continue
-    
-    logger.info(f"✅ Found {len(new_jobs)} new jobs on epunkt.com")
-    return new_jobs
-
-# ==================== MAIN EXECUTION ====================
+# ==================== MAIN EXECUTION (FIXED) ====================
 def main_job_check():
-    """Main function to check all job sources"""
+    """Main function to check all job sources - SINGLE MESSAGE ONLY"""
     start_time = datetime.now()
     logger.info("🚀 Starting job check cycle...")
     
-    all_new_jobs = []
+    all_new_jobs = []  # Collect ALL jobs from ALL sources
     
+    # Define sources to check
     sources = [
         ("jobs.at", check_jobs_at),
         ("karriere.at", check_karriere_at),
-        ("xing.com", check_xing_jobs),
         ("indeed.at", check_indeed_at),
-        ("devjobs.at", check_devjobs_at),
-        ("epunkt.com", check_epunkt_com),
         ("linkedin.com", check_linkedin_jobs)
     ]
     
+    # Check all sources and collect jobs
     for source_name, check_function in sources:
         try:
             logger.info(f"🔍 Checking {source_name}...")
             results = check_function()
             
             if results:
-                all_new_jobs.extend(results)
-                message = format_job_message(results, source_name)
-                if message:
-                    send_telegram_message(message)
-                    time.sleep(2)
+                all_new_jobs.extend(results)  # Add to the master list
+                logger.info(f"Found {len(results)} jobs from {source_name}")
             
         except Exception as e:
             logger.error(f"❌ Error checking {source_name}: {e}")
             continue
     
-    # Send summary message
-    end_time = datetime.now()
-    duration = (end_time - start_time).total_seconds()
-    
+    # Send ONE consolidated message with ALL jobs
     if all_new_jobs:
-        summary_message = f"📊 <b>Job Check Complete!</b>\n\n"
-        summary_message += f"⏰ Duration: {duration:.1f} seconds\n"
-        summary_message += f"🎯 Total new jobs: {len(all_new_jobs)}\n"
-        summary_message += f"🔄 Next check: {(datetime.now() + timedelta(hours=2)).strftime('%H:%M')}\n\n"
-        
-        sources_count = {}
-        for job in all_new_jobs:
-            source = job['source']
-            sources_count[source] = sources_count.get(source, 0) + 1
-        
-        summary_message += "📋 Breakdown:\n"
-        for source, count in sources_count.items():
-            summary_message += f"• {source}: {count} jobs\n"
-        
-        send_telegram_message(summary_message)
+        message = format_consolidated_job_message(all_new_jobs)
+        if message:
+            send_telegram_message(message)
+            logger.info(f"📱 Sent single message with {len(all_new_jobs)} jobs")
     else:
+        # Only send "no jobs" message if nothing found
         no_jobs_message = f"😴 <b>No new jobs found</b>\n\n"
         no_jobs_message += f"⏰ Checked at: {datetime.now().strftime('%H:%M:%S')}\n"
-        no_jobs_message += f"🔄 Next check: {(datetime.now() + timedelta(hours=2)).strftime('%H:%M')}\n"
-        no_jobs_message += f"💪 Keep your head up! Jobs are coming!"
+        no_jobs_message += f"🔄 Next check: {(datetime.now() + timedelta(hours=2)).strftime('%H:%M')}"
         
         send_telegram_message(no_jobs_message)
     
+    end_time = datetime.now()
+    duration = (end_time - start_time).total_seconds()
     logger.info(f"✅ Job check completed. Found {len(all_new_jobs)} new jobs in {duration:.1f} seconds")
     return len(all_new_jobs)
 
 def send_test_message():
-    """Send test message to verify Telegram setup"""
-    test_message = "🤖 <b>Austrian Job Scraper Bot Activated!</b>\n\n"
-    test_message += "✅ Telegram connection working\n"
-    test_message += "🔍 Monitoring Austrian job portals:\n"
-    test_message += "• jobs.at\n• karriere.at\n• stepstone.at\n• indeed.at\n• devjobs.at\n• epunkt.com\n• linkedin.com\n\n"
-    test_message += f"⏰ Checking every 2 hours\n"
-    test_message += f"🎯 Monitoring {len(KEYWORDS)} keywords\n"
-    test_message += f"📍 Targeting {len(LOCATIONS)} locations\n\n"
-    test_message += "📋 Your keywords:\n"
-    for keyword in KEYWORDS[:10]:
-        test_message += f"• {keyword}\n"
-    
-    if len(KEYWORDS) > 10:
-        test_message += f"... and {len(KEYWORDS) - 10} more\n"
-    
-    test_message += "\n🚀 Starting first job check in 30 seconds..."
+    """Send simple test message"""
+    test_message = "🤖 <b>Job Scraper Bot Started!</b>\n\n"
+    test_message += "✅ Ready to find Austrian jobs\n"
+    test_message += "🔍 Checking every 2 hours\n"
+    test_message += "📱 Single notification per check cycle"
     
     return send_telegram_message(test_message)
 
-def send_daily_summary():
-    """Send daily summary of job search activity"""
-    logger.info("📊 Sending daily summary...")
-    
-    conn = sqlite3.connect('jobs.db')
-    cursor = conn.cursor()
-    
-    today = datetime.now().strftime('%Y-%m-%d')
-    cursor.execute("SELECT COUNT(*) FROM jobs WHERE date_found LIKE ?", (f"{today}%",))
-    today_count = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM jobs")
-    total_count = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT source, COUNT(*) FROM jobs WHERE date_found LIKE ? GROUP BY source", (f"{today}%",))
-    source_breakdown = cursor.fetchall()
-    
-    cursor.execute("SELECT company, COUNT(*) as count FROM jobs WHERE date_found LIKE ? GROUP BY company ORDER BY count DESC LIMIT 5", (f"{today}%",))
-    top_companies = cursor.fetchall()
-    
-    conn.close()
-    
-    summary = f"📊 <b>Daily Job Search Summary</b>\n\n"
-    summary += f"📈 Today's new jobs: {today_count}\n"
-    summary += f"🎯 Total jobs tracked: {total_count}\n\n"
-    
-    if source_breakdown:
-        summary += "📋 Today's breakdown:\n"
-        for source, count in source_breakdown:
-            summary += f"• {source}: {count} jobs\n"
-    
-    if top_companies:
-        summary += "\n🏢 Top companies today:\n"
-        for company, count in top_companies:
-            summary += f"• {company}: {count} jobs\n"
-    
-    summary += "\n🔍 Keep applying and stay motivated! 💪"
-    
-    send_telegram_message(summary)
-
-def handle_telegram_commands():
-    """Check for commands sent to the bot"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-        response = requests.get(url)
-        
-        if response.status_code == 200:
-            data = response.json()
-            
-            for update in data.get('result', []):
-                if 'message' in update and 'text' in update['message']:
-                    text = update['message']['text'].lower()
-                    
-                    if text == '/status':
-                        send_status_message()
-                    elif text == '/stats':
-                        send_daily_summary()
-                    elif text == '/check':
-                        main_job_check()
-                    elif text == '/help':
-                        send_help_message()
-    except Exception as e:
-        logger.error(f"Error handling Telegram commands: {e}")
-
-def send_status_message():
-    """Send current bot status"""
-    conn = sqlite3.connect('jobs.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM jobs")
-    total_jobs = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM jobs WHERE date_found LIKE ?", 
-                   (datetime.now().strftime('%Y-%m-%d') + '%',))
-    today_jobs = cursor.fetchone()[0]
-    conn.close()
-    
-    status_msg = f"🤖 <b>Bot Status: ACTIVE</b>\n\n"
-    status_msg += f"📊 Total jobs tracked: {total_jobs}\n"
-    status_msg += f"📈 Today's jobs: {today_jobs}\n"
-    status_msg += f"⏰ Last check: {datetime.now().strftime('%H:%M:%S')}\n"
-    status_msg += f"🔄 Next check: {(datetime.now() + timedelta(hours=2)).strftime('%H:%M')}\n\n"
-    status_msg += "🔍 Monitoring sites:\n"
-    status_msg += "• jobs.at\n• karriere.at\n• stepstone.at\n• indeed.at\n• devjobs.at\n• epunkt.com\n\n"
-    status_msg += "📱 Available commands:\n"
-    status_msg += "• /status - Bot status\n"
-    status_msg += "• /stats - Daily summary\n"
-    status_msg += "• /check - Manual job check\n"
-    status_msg += "• /help - Command help"
-    
-    send_telegram_message(status_msg)
-
-def send_help_message():
-    """Send help message with available commands"""
-    help_msg = f"🤖 <b>Austrian Job Scraper Bot</b>\n\n"
-    help_msg += f"📋 <b>Available Commands:</b>\n\n"
-    help_msg += f"🔍 /check - Run manual job search\n"
-    help_msg += f"📊 /status - Show bot status & stats\n"
-    help_msg += f"📈 /stats - Daily job summary\n"
-    help_msg += f"❓ /help - Show this help message\n\n"
-    help_msg += f"🎯 <b>Current Settings:</b>\n"
-    help_msg += f"• {len(KEYWORDS)} keywords monitored\n"
-    help_msg += f"• {len(LOCATIONS)} locations tracked\n"
-    help_msg += f"• 6 job portals checked\n"
-    help_msg += f"• Checks every 2 hours\n\n"
-    help_msg += f"💡 <b>Tips:</b>\n"
-    help_msg += f"• Bot runs 24/7 automatically\n"
-    help_msg += f"• You'll get notified of new jobs instantly\n"
-    help_msg += f"• Duplicates are automatically filtered\n"
-    help_msg += f"• All jobs are saved to database"
-    
-    send_telegram_message(help_msg)
-
-# ==================== SCHEDULING ====================
+# ==================== SCHEDULING (SIMPLIFIED) ====================
 def start_scheduler():
-    """Start the job scheduler"""
+    """Start the job scheduler - simplified version"""
     logger.info("Starting job scheduler...")
     
     init_database()
     send_test_message()
     
+    # Wait before first check
     time.sleep(30)
     
     # Schedule job checks every 2 hours
     schedule.every(2).hours.do(main_job_check)
-    
-    # Schedule daily summary at 9 AM
-    schedule.every().day.at("09:00").do(send_daily_summary)
-    
-    # Check for Telegram commands every 5 minutes
-    schedule.every(5).minutes.do(handle_telegram_commands)
     
     # Run initial check
     main_job_check()
@@ -1057,9 +539,9 @@ def start_scheduler():
         time.sleep(60)
 
 if __name__ == "__main__":
-    print("🚀 Starting Austrian Job Scraper Bot...")
-    print("📱 Telegram notifications enabled")
-    print("🔍 Monitoring 8 job portals every 2 hours")
+    print("🚀 Starting Simplified Job Scraper...")
+    print("📱 Single Telegram notification per cycle")
+    print("🔍 Checking 4 job portals every 2 hours")
     print("⏹️  Press Ctrl+C to stop")
     
     try:
