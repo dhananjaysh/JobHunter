@@ -506,22 +506,15 @@ def main_job_check():
     logger.info(f"✅ Job check completed. Found {len(all_new_jobs)} new jobs in {duration:.1f} seconds")
     return len(all_new_jobs)
 
-def send_test_message():
-    """Send simple test message"""
-    test_message = "🤖 <b>Job Scraper Bot Started!</b>\n\n"
-    test_message += "✅ Ready to find Austrian jobs\n"
-    test_message += "🔍 Checking every 2 hours\n"
-    test_message += "📱 Single notification per check cycle"
-    
-    return send_telegram_message(test_message)
-
 # ==================== SCHEDULING (SIMPLIFIED) ====================
 def start_scheduler():
     """Start the job scheduler - simplified version"""
     logger.info("Starting job scheduler...")
     
     init_database()
-    send_test_message()
+    
+    # NO TEST MESSAGE - Start directly
+    logger.info("Bot started - checking jobs in 30 seconds...")
     
     # Wait before first check
     time.sleep(30)
